@@ -31,6 +31,20 @@ class Node:
     #print(self.sub_cluster[0])
     return
 
+  # Add a child node
+  def add_parent(self, parent):
+    match parent["node_type"]:
+      case "Master":
+        self.current_node["node_type"] = "ChunkMaster"
+      
+      case "ChunkMaster":
+        self.current_node["node_type"] = "Chunk"
+
+    #print("check success")
+    self.parent_nodes.append(parent)
+    #print(self.sub_cluster[0])
+    return
+
   # Will overwrite identical keys
   # Returns false, or the next node to query.
   def add_data(self, name, data):
@@ -79,20 +93,24 @@ class Node:
   def heartbeat(self):
     # sends a heartbeat request (sub-function)
     def heartbeat_send(node):
-      print("heartbeat " + node)
-      return
+      rq = client.ServerProxy(f"http://{node["ip"]}:{node["port"]}")
+      if rq.heartbeat_reply():
+        print("PROBLEM STATE HEARTBEAT ERROR!!")
+      else:
+        return
 
     while True:
       time.sleep(5)
       #print("beat")
       for node in self.sub_cluster:
+        print(node)
         heartbeat_send(node)
       for node in self.parent_nodes:
         heartbeat_send(node)
 
   def __init__(self, node_type, sub_cluster, parent_nodes, ip, port):
-    self.sub_cluster.append(sub_cluster)
-    self.parent_nodes.append(parent_nodes)
+    self.sub_cluster += sub_cluster
+    self.parent_nodes += parent_nodes
     self.sub_cluster = list(filter(None, self.sub_cluster))
     self.parent_nodes = list(filter(None, self.parent_nodes))
     self.current_node = {"node_type":node_type, "ip":ip, "port":port}
@@ -100,6 +118,7 @@ class Node:
 
     if(self.current_node['node_type'] == "Master" or self.current_node['node_type'] == "ChunkMaster"):
       if self.sub_cluster == []:
+        ###### NEEDS TO ACCESS GOOGLE COMPUTE ENGINE API!!!!! This should start up the sub cluster by spinning up machine images which contain the code
         print("start subcluster servers")
 
     # begins the heartbeat thread
@@ -109,6 +128,7 @@ class Node:
     # This node acts as server
     srv = server.SimpleXMLRPCServer((self.current_node["ip"], self.current_node['port']))
     srv.register_function(self.add_child, "add_child")
+    srv.register_function(self.add_parent, "add_parent")
     srv.register_function(self.add_data, "add_data")
     srv.register_function(self.get_data, "get_data")
     srv.register_function(self.remove_data, "remove_data")
@@ -120,4 +140,24 @@ class Node:
 ################
 ## Cold Start ##
 ################
-master = Node("Master", None, None, "localhost", 9000)
+master = Node(
+  node_type="Master", 
+  sub_cluster=[{"node_type":"ChunkMaster", "ip":"localhost", "port": 9001}], 
+  parent_nodes=[], 
+  ip="localhost", 
+  port=9000
+)
+chunkmaster = Node(
+  node_type="ChunkMaster", 
+  sub_cluster=[{"node_type":"Chunk", "ip":"localhost", "port": 9002}], 
+  parent_nodes=[{"node_type":"Master", "ip":"localhost", "port": 9000}], 
+  ip="localhost", 
+  port=9001
+)
+chunk = Node(
+  node_type="Chunk", 
+  sub_cluster=[], 
+  parent_nodes=[{"node_type":"ChunkMaster", "ip":"localhost", "port": 9001}], 
+  ip="localhost", 
+  port=9002
+)
