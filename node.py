@@ -2,11 +2,29 @@ from xmlrpc import server, client
 import threading
 import time
 import socket
-
+import keyboard
+import random
 
 class Node:
-  master_node = None
+  full_cluster = []
   rebuilding = False
+
+  #returns sibling nodes, including self
+  def get_siblings(self):
+    siblings = []
+    if self.node_id == 0: #is it the master node
+      return Node.full_cluster[0]
+    if self.node_id % self.replication_factor == 1: #is it in the middle layer of the tree
+      for i in range(self.cluster_size):
+        siblings.append(Node.full_cluster[(self.node_id + i*self.replication_factor)%(self.cluster_size*self.replication_factor)])
+    else: #it must be at the bottom layer of the tree
+      offset = 0
+      for i in range(self.replication_factor - 1):
+        # adjust offset if at the end of a replication group
+        if (self.node_id + i) % self.replication_factor == 1:
+          offset = -self.replication_factor + 1
+        siblings.append(Node.full_cluster[self.node_id + i + offset])
+    return siblings
 
   # returns info about the parameter node, stripping recursive dicts for serialization
   def node_info(node):
@@ -51,9 +69,11 @@ class Node:
         return False
 
       case "Master":
-        cluster_index = hash(name) % len(self.sub_cluster)
+        cluster_index = hash(name) % self.cluster_size
+        cluster_index *= self.replication_factor
+        cluster_index += 1
         self.datastore[name] = cluster_index
-        return Node.node_info(self.sub_cluster[cluster_index])
+        return Node.node_info(Node.full_cluster[cluster_index])
   
   # Returns false, or the next node to query
   def get_data(self, name):
@@ -61,13 +81,20 @@ class Node:
       case "Chunk":
         data = None
         try:
+          if name == None:
+            return self.datastore
           data = self.datastore[name]
           return data
         except:
           return NameError("Not Found")
         
       case "Master":
-        return Node.node_info(self.sub_cluster[hash(name) % len(self.sub_cluster)])
+        cluster_index = hash(name) % self.cluster_size
+        cluster_index =  cluster_index * self.replication_factor + 1
+        #print("the middle cluster chunkserver is", cluster_index)
+        cluster_index += random.randint(0, self.replication_factor - 1)
+        #print("a random cluster chunkserver in that subcluster is", cluster_index)
+        return Node.node_info(Node.full_cluster[cluster_index])
       
   # Returns false, or the next node to query
   def remove_data(self, name):
@@ -82,58 +109,75 @@ class Node:
         
       case "Master":
         return Node.node_info(self.sub_cluster[hash(name) % len(self.sub_cluster)])
+  
+  # heals the cluster after a dead node is detected, relationship is 'sub_cluster' or 'parent_nodes' depending on where the dead node was located
+  # relationship is used to determine how to heal the cluster, either by adding a new bottom layer node or a middle layer node
+  def heal_cluster(self, dead_node, relationship):
+    if Node.rebuilding:
+      return
+    Node.rebuilding = True
+    print("HEALING CLUSTER INITIATED BY NODE AT PORT:", self.current_node["port"])
+    # healing process
+    match relationship:
+      case 'sub_cluster':
+        # Dead Node was in the sub_cluster of the current node, dead node must be at the bottom of the tree, and pass in current node datastore for rebuild
+        Node("Chunk", [], [self.current_node, Node.full_cluster[0]], dead_node["ip"], dead_node["port"], node_id=dead_node["node_id"], cluster_size=self.cluster_size, replication_factor=self.replication_factor, rebuild=True, datastore=self.datastore)
+      
+      case 'parent_nodes':
+        # Dead Node was in the parent_nodes of the current node, dead node must be in the middle of the tree
+        #print(Node.full_cluster[0])
+        Node("Chunk", self.get_siblings(), [Node.full_cluster[0]], dead_node["ip"], dead_node["port"], node_id=dead_node["node_id"], cluster_size=self.cluster_size, replication_factor=self.replication_factor, rebuild=True, datastore=self.datastore)
 
   # replies to heartbeat requests
   def heartbeat_reply(self):
+    print("<-hb-", self.current_node["port"])
     return True
-  
-  # Runs in a separate thread and manages heartbeats, queries all sub nodes and parent nodes
+
+  # Runs in a separate thread and sends heartbeats, queries all sub nodes and parent nodes
   def heartbeat(self):
     # sends a heartbeat request (sub-function)
     def heartbeat_send(node, cluster_type):
       #return
-      print(self.current_node["port"], "Sending heartbeat to:", node["port"], "full details:", node)
+      print(self.current_node["port"], "-hb->", node["port"])
       try:
         rq = client.ServerProxy(f"http://{node["ip"]}:{node["port"]}")
-        socket.setdefaulttimeout(15)
-        if not rq.heartbeat_reply():
+        socket.setdefaulttimeout(10)
+        if not Node.rebuilding and not rq.heartbeat_reply():
           print("PROBLEM STATE HEARTBEAT ERROR!!")
           raise Exception("Heartbeat reply was false.")
         else:
           return
       except Exception as e:
-        print(f"HEARTBEAT FAILED: Node at {node["ip"]}:{node["port"]} is dead. Error: {e}")
-        Node.rebuilding = True
-        match cluster_type:
-          case 'sub_cluster':
-            # Node was in the sub_cluster of the current node, must be at the bottom of the tree
-            Node("Chunk", [], [self.current_node, Node.master_node], node["ip"], node["port"])
-          
-          case 'parent_nodes':
-            # Node was in the parent_nodes of the current node, must be in the middle of the tree
-            #print(Node.master_node)
-            Node("Chunk", [self.current_node], [Node.master_node], node["ip"], node["port"])
+        if not Node.rebuilding:
+          print(f"HEARTBEAT FAILED: Node at {node["ip"]}:{node["port"]} is dead. Error: {e}")
+          self.heal_cluster(dead_node=node, relationship=cluster_type)
 
     while not self.stop_event.is_set():
+      while Node.rebuilding:
+        time.sleep(5)
       time.sleep(5)
       #print("beat")
       for node in self.sub_cluster:
         #print(node)
+        if self.stop_event.is_set():
+          break
         if not Node.rebuilding:
           heartbeat_send(node, 'sub_cluster')
       else:
-        print(self.current_node["port"], "has no sub_cluster nodes to heartbeat.")
-      if self.parent_nodes != [] and not Node.rebuilding:
+        pass
+      if self.parent_nodes != [] and not self.stop_event.is_set() and not Node.rebuilding:
         heartbeat_send(self.parent_nodes[0], 'parent_nodes')
       else:
-        print(self.current_node["port"], "has no parent_nodes to heartbeat. Or is rebuilding.")
+        pass
 
   # kills the node
+  # throws a timeout exception on the caller side b/c the server is shut down
   def discard(self):
     def shutdown_node():
       print("shutting down node at", self.current_node['ip'], ":", self.current_node['port'])
       self.stop_event.set()
       self.srv.shutdown()
+      self.heartbeat_thread.join(timeout=5)
       self.server_thread.join(timeout=5)
     
     # starting shutdown thread
@@ -141,19 +185,23 @@ class Node:
     t.start()
     t.join(timeout=10)
     print("node at", self.current_node['ip'], ":", self.current_node['port'], "shut down successfully.")
+    return True
 
   # Cluster size defined by cluster_size * replication_factor + 1. +1 for master.
-  def __init__(self, node_type, sub_cluster, parent_nodes, ip, port, cluster_size=3, replication_factor=3):
-    self.current_node = {"node_type":"Chunk", "ip":None, "port":None}
+  def __init__(self, node_type, sub_cluster, parent_nodes, ip, port, node_id=0, cluster_size=3, replication_factor=3, rebuild=False, datastore={}):
+    self.current_node = {"node_type":"Chunk", "ip":None, "port":None, "node_id":None}
     self.sub_cluster = []
     self.parent_nodes = []
-    self.datastore = {}
+    self.node_id = node_id
+    self.replication_factor = replication_factor
+    self.cluster_size = cluster_size
+    self.datastore = datastore
     
     self.sub_cluster += sub_cluster
     self.parent_nodes += parent_nodes
     self.sub_cluster = list(filter(None, self.sub_cluster))
     self.parent_nodes = list(filter(None, self.parent_nodes))
-    self.current_node = {"node_type":node_type, "ip":ip, "port":port}
+    self.current_node = {"node_type":node_type, "ip":ip, "port":port, "node_id":node_id}
     #print(self.current_node, self.sub_cluster, self.parent_nodes)
 
     # This node acts as server
@@ -170,19 +218,23 @@ class Node:
     self.server_thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
     self.server_thread.start()
 
-    if(self.current_node['node_type'] == "Master" and self.sub_cluster == []):
-      Node.master_node = self.current_node
+    if(self.current_node['node_type'] == "Master" and self.sub_cluster == [] and not rebuild):
       print("Starting subcluster servers")
+      Node.full_cluster = [None] * (1 + cluster_size * replication_factor)
       for i in range(cluster_size):
-        n = Node("Chunk", [], [self.current_node], "localhost", port + i*replication_factor + 1)
+        n = Node("Chunk", [], [self.current_node], "localhost", port + i*replication_factor + 1, node_id=node_id + i*replication_factor + 1, cluster_size=cluster_size, replication_factor=replication_factor)
         self.sub_cluster.append(n.current_node)
 
-    if(self.current_node['node_type'] == "Chunk" and self.parent_nodes[0]["node_type"] == "Master"):
+    print("parent nodes:",self.parent_nodes, "sub cluster:", self.sub_cluster)
+    if(self.current_node['node_type'] == "Chunk" and self.parent_nodes[0]["node_type"] == "Master" and not rebuild):
       print("Starting subcluster chunk servers")
       for i in range(replication_factor - 1):
-        n = Node("Chunk", [], [] + [self.current_node] + self.parent_nodes, "localhost", port + i + 1)
+        n = Node("Chunk", [], [] + [self.current_node] + self.parent_nodes, "localhost", port + i + 1, node_id= node_id + i + 1, cluster_size=cluster_size, replication_factor=replication_factor)
         #print(n.current_node, n.parent_nodes)
         self.sub_cluster.append(n.current_node)
+
+    print(self.node_id, "has completed healing/rebuilding process." if rebuild else "has started")
+    Node.full_cluster[self.node_id] = self.current_node
 
     self.stop_event = threading.Event()
 
@@ -190,7 +242,9 @@ class Node:
     self.heartbeat_thread = threading.Thread(target=self.heartbeat, daemon=True)
     self.heartbeat_thread.start()
 
-    Node.rebuilding = False
+    if rebuild:
+      time.sleep(5)  # wait for heartbeat stabilization
+      Node.rebuilding = False
 
     # if self.current_node['node_type'] == "Master":
     #   while True:
@@ -200,12 +254,16 @@ class Node:
 ################
 ## Cold Start ##
 ################
+rf = 3  # replication factor
+cs = 3  # cluster size
 master_thread = threading.Thread(target=lambda: Node(
   node_type="Master", 
   sub_cluster=[], 
   parent_nodes=[], 
   ip="localhost", 
-  port=9000
+  port=9000,
+  cluster_size=cs,
+  replication_factor=rf
 ), daemon=True)
 master_thread.start()
 
@@ -218,25 +276,59 @@ print("Adding data to cluster via master node...")
 ret = master.add_data("example_key", "example_value")
 print ("Master returned:", ret, "adding to node...")
 if ret["node_type"] == "Chunk":
-    rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
-    rq.add_data("example_key", "example_value")
-    print("Data added.")
+  rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+  rq.add_data("example_key", "example_value")
+  print("Data added.")
 
 print("Requsting data from cluster via master node...")
 ret = master.get_data("example_key")
 print("Retrieving data from chunk node", ret, "directly...")
 if ret["node_type"] == "Chunk":
-    rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
-    data = rq.get_data("example_key")
-    print("Data retrieved: ", data)
+  rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+  data = rq.get_data("example_key")
+  print("Data retrieved: ", data)
 
 # kill a node to test heartbeat recovery
 print("Killing a chunk node to test heartbeat recovery...")
 if ret["node_type"] == "Chunk":
-    rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+  rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+  try:
     rq.discard()
-    print("Node killed.")
+  except Exception as e:
+    print("Node kill exception (expected):", e)
 
-# keep main thread alive
+# keep main thread alive and do basic commands
+print("Press 'q' to shut down the cluster.")
+print("Press 'k' to kill another chunk node to test heartbeat recovery.")
+print("Press 'space' to print the cluster structure.")
 while True:
-    time.sleep(1)
+  time.sleep(0.1)
+  if keyboard.is_pressed('q'):
+    print("Shutting down cluster... This will take a few seconds.")
+    master.discard()
+    break
+  if keyboard.is_pressed('k'):
+    print("Killing a chunk node to test heartbeat recovery...")
+    ret = master.get_data("example_key")
+    rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+    try:
+      rq.discard()
+    except Exception as e:
+      print("Node kill exception (expected):", e)
+  if keyboard.is_pressed('g'):
+    print("Requesting data from cluster via master node...")
+    ret = master.get_data("example_key")
+    print("Retrieving data from chunk node", ret, "directly...")
+    if ret["node_type"] == "Chunk":
+      rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+      data = rq.get_data("example_key")
+      print("Data retrieved: ", data)
+  if keyboard.is_pressed('space'):
+    print("Printing cluster structure...")
+    for node in Node.full_cluster:
+      if node["node_id"] == 0:
+        print("Master Node:", Node.full_cluster[0])
+      elif node["node_id"] % rf == 1:
+        print("\tChunk Node (Middle Layer):", node)
+      else:
+        print("\t\tChunk Node (Bottom Layer):", node)
