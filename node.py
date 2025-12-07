@@ -101,14 +101,21 @@ class Node:
     match self.current_node["node_type"]:
       case "Chunk":
         try:
-          self.datastore.pop(name)
+          print(self.datastore)
+          del self.datastore[name]
+          print(self.datastore)
           return False
 
         except:
           return NameError(name + " Not Found")
         
       case "Master":
-        return Node.node_info(self.sub_cluster[hash(name) % len(self.sub_cluster)])
+        try:
+          del self.datastore[name]
+          return Node.node_info(self.sub_cluster[hash(name) % len(self.sub_cluster)])
+        except:
+          return NameError(name + " Not Found")
+        
   
   # heals the cluster after a dead node is detected, relationship is 'sub_cluster' or 'parent_nodes' depending on where the dead node was located
   # relationship is used to determine how to heal the cluster, either by adding a new bottom layer node or a middle layer node
@@ -130,7 +137,7 @@ class Node:
 
   # replies to heartbeat requests
   def heartbeat_reply(self):
-    print("<-hb-", self.current_node["port"])
+    print("<-rp-", self.current_node["port"])
     return True
 
   # Runs in a separate thread and sends heartbeats, queries all sub nodes and parent nodes
@@ -280,7 +287,32 @@ if ret["node_type"] == "Chunk":
   rq.add_data("example_key", "example_value")
   print("Data added.")
 
-print("Requsting data from cluster via master node...")
+print("Adding second data to cluster via master node...")
+ret2 = master.add_data("second_key", "second_value")
+print("Master returned:", ret2, "adding to node...")
+if ret2["node_type"] == "Chunk":
+  rq2 = client.ServerProxy(f"http://{ret2["ip"]}:{ret2["port"]}")
+  rq2.add_data("second_key", "second_value")
+  print("Second data added.")
+
+# Delete the second key-value pair
+print("Removing second data from cluster via master node...")
+ret_delete = master.remove_data("second_key")
+if ret2["node_type"] == "Chunk":
+  rq2 = client.ServerProxy(f"http://{ret2['ip']}:{ret2['port']}")
+  ret_delete_node = rq2.remove_data("second_key")
+  print("Second key removed from chunk node.")
+
+# Attempt to retrieve the deleted key
+print("Requesting deleted data from cluster via master node...")
+ret_deleted = master.get_data("second_key")
+print("Master returned:", ret_deleted)
+if ret_deleted["node_type"] == "Chunk":
+  rq_deleted = client.ServerProxy(f"http://{ret_deleted['ip']}:{ret_deleted['port']}")
+  deleted_data = rq_deleted.get_data("second_key")
+  print("Deleted key retrieval result:", deleted_data)
+
+print("Requesting data from cluster via master node...")
 ret = master.get_data("example_key")
 print("Retrieving data from chunk node", ret, "directly...")
 if ret["node_type"] == "Chunk":
