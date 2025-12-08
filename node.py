@@ -64,7 +64,7 @@ class Node:
         self.datastore[name] = data
         if self.sub_cluster != []:
           for node in self.sub_cluster:
-            replication_rq = client.ServerProxy(f"http://{node["ip"]}:{node["port"]}")
+            replication_rq = client.ServerProxy(f"http://{node['ip']}:{node['port']}")
             replication_rq.add_data(name, data)
         return False
 
@@ -147,7 +147,7 @@ class Node:
       #return
       print(self.current_node["port"], "-hb->", node["port"])
       try:
-        rq = client.ServerProxy(f"http://{node["ip"]}:{node["port"]}")
+        rq = client.ServerProxy(f"http://{node['ip']}:{node['port']}")
         socket.setdefaulttimeout(10)
         if not Node.rebuilding and not rq.heartbeat_reply():
           print("PROBLEM STATE HEARTBEAT ERROR!!")
@@ -156,7 +156,7 @@ class Node:
           return
       except Exception as e:
         if not Node.rebuilding:
-          print(f"HEARTBEAT FAILED: Node at {node["ip"]}:{node["port"]} is dead. Error: {e}")
+          print(f"HEARTBEAT FAILED: Node at {node['ip']}:{node['port']} is dead. Error: {e}")
           self.heal_cluster(dead_node=node, relationship=cluster_type)
 
     while not self.stop_event.is_set():
@@ -283,7 +283,7 @@ print("Adding data to cluster via master node...")
 ret = master.add_data("example_key", "example_value")
 print ("Master returned:", ret, "adding to node...")
 if ret["node_type"] == "Chunk":
-  rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+  rq = client.ServerProxy(f"http://{ret['ip']}:{ret['port']}")
   rq.add_data("example_key", "example_value")
   print("Data added.")
 
@@ -291,7 +291,7 @@ print("Adding second data to cluster via master node...")
 ret2 = master.add_data("second_key", "second_value")
 print("Master returned:", ret2, "adding to node...")
 if ret2["node_type"] == "Chunk":
-  rq2 = client.ServerProxy(f"http://{ret2["ip"]}:{ret2["port"]}")
+  rq2 = client.ServerProxy(f"http://{ret2['ip']}:{ret2['port']}")
   rq2.add_data("second_key", "second_value")
   print("Second data added.")
 
@@ -316,14 +316,14 @@ print("Requesting data from cluster via master node...")
 ret = master.get_data("example_key")
 print("Retrieving data from chunk node", ret, "directly...")
 if ret["node_type"] == "Chunk":
-  rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+  rq = client.ServerProxy(f"http://{ret['ip']}:{ret['port']}")
   data = rq.get_data("example_key")
   print("Data retrieved: ", data)
 
 # kill a node to test heartbeat recovery
 print("Killing a chunk node to test heartbeat recovery...")
 if ret["node_type"] == "Chunk":
-  rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+  rq = client.ServerProxy(f"http://{ret['ip']}:{ret['port']}")
   try:
     rq.discard()
   except Exception as e:
@@ -342,7 +342,7 @@ while True:
   if keyboard.is_pressed('k'):
     print("Killing a chunk node to test heartbeat recovery...")
     ret = master.get_data("example_key")
-    rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+    rq = client.ServerProxy(f"http://{ret['ip']}:{ret['port']}")
     try:
       rq.discard()
     except Exception as e:
@@ -352,7 +352,7 @@ while True:
     ret = master.get_data("example_key")
     print("Retrieving data from chunk node", ret, "directly...")
     if ret["node_type"] == "Chunk":
-      rq = client.ServerProxy(f"http://{ret["ip"]}:{ret["port"]}")
+      rq = client.ServerProxy(f"http://{ret['ip']}:{ret['port']}")
       data = rq.get_data("example_key")
       print("Data retrieved: ", data)
   if keyboard.is_pressed('space'):
